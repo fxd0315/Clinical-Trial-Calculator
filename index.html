@@ -1,0 +1,469 @@
+import React, { useState, useMemo } from 'react';
+import { Calculator, FileText, Info, Copy, Check, TrendingUp, Users, AlertCircle, RefreshCw, BarChart3 } from 'lucide-react';
+
+const SampleSizeCalculator = () => {
+  // --- State Definitions ---
+  const [p1, setP1] = useState(25);
+  const [p2, setP2] = useState(65);
+  const [alpha, setAlpha] = useState(0.05);
+  const [power, setPower] = useState(90); // Store as percentage (e.g., 90)
+  const [dropout, setDropout] = useState(20);
+  const [method, setMethod] = useState('continuity');
+  const [copied, setCopied] = useState(false);
+
+  // --- Helper: Inverse Normal Distribution (Probit Function) ---
+  // Approximation of the inverse cumulative standard normal distribution function
+  // Abramowitz and Stegun formula 26.2.23
+  const getNormInv = (p) => {
+    if (p < 0 || p > 1) return 0;
+    if (p < 0.5) return -getNormInv(1 - p);
+    
+    const t = Math.sqrt(-2 * Math.log(1 - p));
+    const c0 = 2.515517;
+    const c1 = 0.802853;
+    const c2 = 0.010328;
+    const d1 = 1.432788;
+    const d2 = 0.189269;
+    const d3 = 0.001308;
+    return t - ((c2 * t + c1) * t + c0) / (((d3 * t + d2) * t + d1) * t + 1);
+  };
+
+  // --- Constants ---
+  // Alpha still uses map for standard values, but we could use getNormInv too
+  const zScoreAlphaMap = {
+      "0.01": 2.576,
+      "0.025": 2.241, 
+      "0.05": 1.960, 
+      "0.10": 1.645
+  };
+
+  // --- Core Calculation Function ---
+  const calculateSingleScenario = (p1Val, p2Val, alphaVal, powerValPercent, dropoutVal, methodVal) => {
+    const rate1 = p1Val / 100;
+    const rate2 = p2Val / 100;
+    const diff = Math.abs(rate1 - rate2);
+
+    if (diff === 0) return { nPerGroup: 0, totalAdjusted: 0 };
+
+    const zAlpha = zScoreAlphaMap[alphaVal.toString()] || 1.96;
+    // Calculate Z_beta dynamically based on Power %
+    const zBeta = getNormInv(powerValPercent / 100);
+
+    // 1. Basic Normal Approximation
+    const pooledVariance = (rate1 * (1 - rate1)) + (rate2 * (1 - rate2));
+    const numerator = Math.pow(zAlpha + zBeta, 2) * pooledVariance;
+    const denominator = Math.pow(diff, 2);
+    let nUncorrected = numerator / denominator;
+
+    let finalN = nUncorrected;
+
+    // 2. Casagrande-Pike-Smith Correction
+    if (methodVal === 'continuity') {
+      const term = 2 / (nUncorrected * diff);
+      const correctionFactor = Math.pow(1 + Math.sqrt(1 + term), 2);
+      finalN = (nUncorrected / 4) * correctionFactor;
+    }
+
+    const nPerGroup = Math.ceil(finalN);
+    const nPerGroupAdjusted = Math.ceil(nPerGroup / (1 - (dropoutVal / 100)));
+
+    return {
+      nPerGroup,
+      nPerGroupAdjusted,
+      totalAdjusted: nPerGroupAdjusted * 2
+    };
+  };
+
+  // --- Main Calculation & Sensitivity Analysis ---
+  const calculationData = useMemo(() => {
+    // 1. Main Result
+    const mainResult = calculateSingleScenario(p1, p2, alpha, power, dropout, method);
+
+    // 2. Sensitivity Analysis (Scenarios)
+    // Compare Base Power (80%) vs User Selected Power
+    const scenarios = [
+      { label: "保守估计 (Conservative)", p2Mod: -10 },
+      { label: "微调 (Moderate)", p2Mod: -5 },
+      { label: "当前假设 (Base Case)", p2Mod: 0 },
+      { label: "乐观估计 (Optimistic)", p2Mod: 5 },
+    ];
+
+    const sensitivityTable = scenarios.map(sc => {
+      let simP2 = p2 + sc.p2Mod;
+      if (simP2 < 1) simP2 = 1;
+      if (simP2 > 99) simP2 = 99;
+
+      if (simP2 === p1) return null;
+
+      // Always calculate for standard 80% power
+      const resPower80 = calculateSingleScenario(p1, simP2, alpha, 80, dropout, method);
+      // Calculate for user's CURRENT selected power
+      const resCurrentPower = calculateSingleScenario(p1, simP2, alpha, power, dropout, method);
+
+      return {
+        ...sc,
+        simP2,
+        nPower80: resPower80.nPerGroupAdjusted,
+        nCurrentPower: resCurrentPower.nPerGroupAdjusted
+      };
+    }).filter(Boolean);
+
+    return { mainResult, sensitivityTable };
+  }, [p1, p2, alpha, power, dropout, method]);
+
+  // --- Handlers ---
+  const handleP1Change = (val) => setP1(Math.min(99, Math.max(0, parseInt(val) || 0)));
+  const handleP2Change = (val) => setP2(Math.min(99, Math.max(0, parseInt(val) || 0)));
+  const handlePowerChange = (val) => setPower(Math.min(99, Math.max(50, parseInt(val) || 80)));
+  const handleDropoutChange = (val) => setDropout(Math.min(99, Math.max(0, parseInt(val) || 0)));
+  
+  const handleReset = () => {
+    setP1(25);
+    setP2(65);
+    setAlpha(0.05);
+    setPower(90);
+    setDropout(20);
+    setMethod('continuity');
+  };
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(generateText());
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // --- Text Generation ---
+  const generateText = () => {
+    const { mainResult } = calculationData;
+    const methodText = method === 'continuity' 
+      ? "Casagrande-Pike-Smith 校正公式 (Casagrande et al., 1978)" 
+      : "两独立样本率的正态近似公式 (Normal Approximation)";
+
+    return `6.1 样本量计算依据 (Sample Size Determination)
+
+本研究样本量计算采用 PASS 软件逻辑，基于两独立样本率的优效性检验（Tests for Two Proportions）。计算公式采用适用于小样本设计的 ${methodText}，以确保统计效能。
+
+参数假设如下：
+1. 对照组（Control Group）：假设事件发生率为 ${p1}%。
+2. 试验组（Experimental Group）：假设事件发生率为 ${p2}%。
+3. 效应差异（Effect Size）：预期组间差异为 ${Math.abs(p1 - p2).toFixed(1)}%。
+
+统计学参数设定为：
+- I 类错误率（双侧 α）：${alpha}
+- 把握度（Power, 1-β）：${power}%
+
+计算结果：
+在上述假设下，理论每组需 ${mainResult.nPerGroup} 例受试者即可达到预设的统计学效能。
+
+样本量修正：
+考虑到临床试验中约 ${dropout}% 的失访或脱落率（Dropout Rate），我们将样本量调整为每组 ${mainResult.nPerGroupAdjusted} 例。
+最终总样本量为 N = ${mainResult.totalAdjusted} 例。
+
+参考文献：
+1. Casagrande, J. T., Pike, M. C., & Smith, P. G. (1978). An improved approximate formula for calculating sample sizes for comparing two binomial distributions. Biometrics, 34, 483-486.`;
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-4 md:p-8 font-sans text-slate-800">
+      <div className="max-w-6xl mx-auto space-y-6">
+        
+        {/* Header */}
+        <header className="flex flex-col md:flex-row md:items-center justify-between pb-6 border-b border-slate-200 gap-4">
+          <div className="flex items-center space-x-3">
+            <div className="bg-blue-600 p-3 rounded-xl shadow-lg shadow-blue-200">
+              <Calculator className="w-8 h-8 text-white" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-slate-900">临床试验样本量计算器</h1>
+              <p className="text-slate-500 text-sm">两独立样本率比较 (Two Independent Proportions)</p>
+            </div>
+          </div>
+          <button 
+            onClick={handleReset}
+            className="flex items-center justify-center px-4 py-2 text-sm font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:text-blue-600 transition-colors shadow-sm"
+          >
+            <RefreshCw className="w-4 h-4 mr-2" />
+            重置默认值
+          </button>
+        </header>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          
+          {/* Left Column: Inputs */}
+          <div className="lg:col-span-5 space-y-6">
+            <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
+              <h2 className="text-lg font-semibold flex items-center mb-6">
+                <TrendingUp className="w-5 h-5 mr-2 text-blue-600" />
+                参数设定 (Parameters)
+              </h2>
+
+              {/* Group 1 & 2 Inputs with Visual Bars */}
+              <div className="space-y-8">
+                {/* Control Group */}
+                <div className="relative">
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="text-sm font-medium text-slate-700">对照组发生率 (P1)</label>
+                    <div className="flex items-center">
+                      <input 
+                        type="number" 
+                        value={p1}
+                        onChange={(e) => handleP1Change(e.target.value)}
+                        className="w-16 p-1 text-center font-bold text-blue-600 bg-blue-50 border border-blue-100 rounded focus:ring-2 focus:ring-blue-500 outline-none"
+                      />
+                      <span className="ml-1 text-sm text-blue-600 font-bold">%</span>
+                    </div>
+                  </div>
+                  <div className="h-1.5 w-full bg-slate-100 rounded-full mb-3 overflow-hidden">
+                    <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${p1}%` }}></div>
+                  </div>
+                  <input 
+                    type="range" min="1" max="99" step="1"
+                    value={p1} 
+                    onChange={(e) => handleP1Change(e.target.value)}
+                    className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600 block"
+                  />
+                  <p className="text-xs text-slate-400 mt-1">例如：安慰剂组 (25%)</p>
+                </div>
+
+                {/* Experimental Group */}
+                <div className="relative">
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="text-sm font-medium text-slate-700">试验组发生率 (P2)</label>
+                    <div className="flex items-center">
+                       <input 
+                        type="number" 
+                        value={p2}
+                        onChange={(e) => handleP2Change(e.target.value)}
+                        className="w-16 p-1 text-center font-bold text-emerald-600 bg-emerald-50 border border-emerald-100 rounded focus:ring-2 focus:ring-emerald-500 outline-none"
+                      />
+                      <span className="ml-1 text-sm text-emerald-600 font-bold">%</span>
+                    </div>
+                  </div>
+                  <div className="h-1.5 w-full bg-slate-100 rounded-full mb-3 overflow-hidden">
+                    <div className="h-full bg-emerald-500 transition-all duration-300" style={{ width: `${p2}%` }}></div>
+                  </div>
+                  <input 
+                    type="range" min="1" max="99" step="1"
+                    value={p2} 
+                    onChange={(e) => handleP2Change(e.target.value)}
+                    className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-emerald-500 block"
+                  />
+                  <p className="text-xs text-slate-400 mt-1">例如：玛仕度肽组 (65%)</p>
+                </div>
+              </div>
+
+              <div className="h-px bg-slate-100 my-6"></div>
+
+              {/* Statistical Parameters */}
+              <div className="space-y-6">
+                {/* Power Slider (Updated) */}
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="text-sm font-medium text-slate-700">把握度 (Power)</label>
+                    <div className="flex items-center">
+                       <input 
+                        type="number" 
+                        value={power}
+                        onChange={(e) => handlePowerChange(e.target.value)}
+                        className="w-14 p-1 text-center font-bold text-purple-600 bg-purple-50 border border-purple-100 rounded focus:ring-2 focus:ring-purple-500 outline-none text-sm"
+                      />
+                      <span className="ml-1 text-sm text-purple-600 font-bold">%</span>
+                    </div>
+                  </div>
+                  <input 
+                    type="range" min="50" max="99" step="1"
+                    value={power} 
+                    onChange={(e) => handlePowerChange(e.target.value)}
+                    className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-purple-600 block"
+                  />
+                  <div className="flex justify-between text-xs text-slate-400 mt-1">
+                    <span>80% (标准)</span>
+                    <span>90% (推荐)</span>
+                    <span>99% (极高)</span>
+                  </div>
+                </div>
+
+                {/* Alpha Select */}
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">I 类错误 (Alpha)</label>
+                  <select 
+                    value={alpha} 
+                    onChange={(e) => setAlpha(parseFloat(e.target.value))}
+                    className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none cursor-pointer"
+                  >
+                    <option value="0.01">0.01 (99% Confidence)</option>
+                    <option value="0.05">0.05 (95% Confidence) - 标准</option>
+                    <option value="0.10">0.10 (90% Confidence)</option>
+                  </select>
+                </div>
+
+                {/* Dropout */}
+                <div>
+                   <div className="flex justify-between items-center mb-1">
+                      <label className="block text-sm font-medium text-slate-700">脱落率 (Dropout Rate)</label>
+                      <div className="flex items-center">
+                        <input 
+                          type="number"
+                          value={dropout}
+                          onChange={(e) => handleDropoutChange(e.target.value)}
+                          className="w-14 p-0.5 text-center font-bold text-orange-600 bg-orange-50 border border-orange-100 rounded focus:ring-2 focus:ring-orange-500 outline-none text-sm"
+                        />
+                        <span className="ml-1 text-sm text-orange-600">%</span>
+                      </div>
+                   </div>
+                   <input 
+                      type="range" min="0" max="40" step="1" 
+                      value={dropout} 
+                      onChange={(e) => handleDropoutChange(e.target.value)}
+                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-orange-500 block"
+                    />
+                </div>
+              </div>
+              
+              <div className="mt-6 p-4 bg-slate-50 rounded-lg border border-slate-100 hover:bg-slate-100 transition-colors">
+                <label className="flex items-start space-x-3 cursor-pointer">
+                  <div className="flex items-center h-5">
+                    <input 
+                      type="checkbox" 
+                      checked={method === 'continuity'}
+                      onChange={(e) => setMethod(e.target.checked ? 'continuity' : 'uncorrected')}
+                      className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="ml-2 text-sm">
+                    <span className="font-medium text-slate-800">使用连续性校正 (推荐)</span>
+                    <p className="text-slate-500 text-xs mt-1">Casagrande-Pike-Smith 方法。适用于小样本或需要 Fisher 精确检验的情况，结果更保守严谨。</p>
+                  </div>
+                </label>
+              </div>
+
+            </div>
+          </div>
+
+          {/* Right Column: Results & Sensitivity & Report */}
+          <div className="lg:col-span-7 space-y-6">
+            
+            {/* 1. Main Results Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex flex-col justify-between relative overflow-hidden transition-all duration-300">
+                <div className="absolute top-0 right-0 p-4 opacity-10">
+                   <Users className="w-24 h-24 text-blue-600" />
+                </div>
+                <div>
+                  <p className="text-sm text-slate-500 font-medium uppercase tracking-wider">理论样本量 (每组)</p>
+                  <div className="mt-2 flex items-baseline">
+                    <span className="text-4xl font-extrabold text-slate-800">{calculationData.mainResult.nPerGroup}</span>
+                    <span className="ml-2 text-sm text-slate-500">例</span>
+                  </div>
+                </div>
+                <div className="mt-4 pt-4 border-t border-slate-100">
+                  <p className="text-xs text-slate-400">Total N = {calculationData.mainResult.nPerGroup * 2} (无脱落)</p>
+                </div>
+              </div>
+
+              <div className="bg-gradient-to-br from-blue-600 to-blue-700 p-6 rounded-2xl shadow-lg shadow-blue-200 text-white flex flex-col justify-between relative overflow-hidden transition-all duration-300">
+                 <div className="absolute top-0 right-0 p-4 opacity-20">
+                   <Check className="w-24 h-24 text-white" />
+                </div>
+                <div>
+                  <p className="text-sm text-blue-100 font-medium uppercase tracking-wider flex items-center">
+                    推荐样本量 (每组)
+                    <Info className="w-4 h-4 ml-1 opacity-70" />
+                  </p>
+                  <div className="mt-2 flex items-baseline">
+                    <span className="text-5xl font-extrabold">{calculationData.mainResult.nPerGroupAdjusted}</span>
+                    <span className="ml-2 text-lg text-blue-100 opacity-80">例 / 组</span>
+                  </div>
+                </div>
+                <div className="mt-4 pt-4 border-t border-blue-500/50">
+                  <div className="flex justify-between items-end">
+                    <div>
+                      <p className="text-xs text-blue-200 uppercase tracking-wide">总样本量 (Total N)</p>
+                      <p className="text-xl font-bold">{calculationData.mainResult.totalAdjusted}</p>
+                    </div>
+                    <div className="text-right">
+                       <span className="text-xs bg-blue-800/50 px-2 py-1 rounded text-blue-100">含 {dropout}% 脱落率</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Warning Message */}
+            {calculationData.mainResult.nPerGroupAdjusted < 30 && (
+               <div className="flex items-start p-4 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-sm animate-in fade-in slide-in-from-top-2">
+                 <AlertCircle className="w-5 h-5 mr-2 flex-shrink-0 mt-0.5" />
+                 <p>
+                   <strong>注意：</strong> 计算出的样本量较小（&lt;30例/组）。虽然统计学上可行，但可能无法充分评估安全性（Safety）。建议将样本量圆整至 30-50 例以满足法规对安全性暴露的基本要求。
+                 </p>
+               </div>
+            )}
+
+            {/* 2. Sensitivity Analysis Table (Dynamic Power Columns) */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+               <div className="p-4 bg-slate-50 border-b border-slate-100 flex items-center">
+                  <BarChart3 className="w-4 h-4 mr-2 text-blue-600" />
+                  <h3 className="font-semibold text-slate-800 text-sm">敏感性分析：不同疗效与把握度 (Sensitivity Analysis)</h3>
+               </div>
+               <div className="overflow-x-auto">
+                 <table className="w-full text-sm text-left">
+                   <thead className="bg-slate-50/50 text-slate-500 font-medium border-b border-slate-100">
+                     <tr>
+                       <th className="px-4 py-3">场景假设 (Scenario)</th>
+                       <th className="px-4 py-3">试验组 P2</th>
+                       <th className="px-4 py-3 text-slate-400">Power 80% (N/组)</th>
+                       <th className="px-4 py-3 bg-purple-50/50 text-purple-700">Power {power}% (N/组)</th>
+                     </tr>
+                   </thead>
+                   <tbody className="divide-y divide-slate-50">
+                     {calculationData.sensitivityTable.map((row, idx) => (
+                       <tr key={idx} className={`hover:bg-slate-50 transition-colors ${row.p2Mod === 0 ? 'bg-purple-50/30 font-medium' : ''}`}>
+                         <td className="px-4 py-3 text-slate-700">
+                            {row.label}
+                            {row.p2Mod === 0 && <span className="ml-2 text-xs bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded-full">当前</span>}
+                         </td>
+                         <td className="px-4 py-3 text-emerald-600 font-medium">{row.simP2}%</td>
+                         <td className="px-4 py-3 text-slate-400">{row.nPower80}</td>
+                         <td className="px-4 py-3 text-purple-700 bg-purple-50/30 font-bold">{row.nCurrentPower}</td>
+                       </tr>
+                     ))}
+                   </tbody>
+                 </table>
+               </div>
+               <div className="p-3 bg-slate-50/50 border-t border-slate-100 text-xs text-slate-400">
+                  * 表中 N 值为包含 {dropout}% 脱落率后的每组样本量推荐值。
+               </div>
+            </div>
+
+            {/* 3. Protocol Writer */}
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 flex flex-col h-[300px]">
+              <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50 rounded-t-2xl">
+                <h3 className="font-semibold text-slate-800 flex items-center">
+                  <FileText className="w-4 h-4 mr-2 text-blue-600" />
+                  方案撰写助手 (Protocol Writer)
+                </h3>
+                <button 
+                  onClick={handleCopy}
+                  className={`flex items-center px-3 py-1.5 rounded-lg text-sm transition-all duration-200 ${copied ? 'bg-green-100 text-green-700' : 'bg-white border border-slate-200 hover:bg-slate-50 text-slate-600'}`}
+                >
+                  {copied ? <Check className="w-4 h-4 mr-1.5" /> : <Copy className="w-4 h-4 mr-1.5" />}
+                  {copied ? '已复制' : '复制文本'}
+                </button>
+              </div>
+              <div className="flex-1 p-4 overflow-y-auto bg-slate-50/30">
+                <textarea 
+                  readOnly 
+                  value={generateText()}
+                  className="w-full h-full bg-transparent resize-none outline-none text-sm text-slate-700 font-mono leading-relaxed focus:bg-white transition-colors p-2 rounded"
+                />
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default SampleSizeCalculator;
